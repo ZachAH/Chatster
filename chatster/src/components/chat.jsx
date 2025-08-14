@@ -1,46 +1,84 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, onAuthStateChanged, signInWithCustomToken, signInAnonymously } from 'firebase/auth';
-import { getFirestore, collection, addDoc, serverTimestamp, query, orderBy, onSnapshot } from 'firebase/firestore';
+import { getAuth, onAuthStateChanged, signInAnonymously } from 'firebase/auth';
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  serverTimestamp,
+  query,
+  orderBy,
+  onSnapshot,
+  getDocs,
+  deleteDoc,
+  doc
+} from 'firebase/firestore';
 
-// Main App component
-export default function App() {
-  // Check if firebase config and auth token are available in the Canvas environment.
-  const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-  const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-  const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-  
+// Firebase Config
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID
+};
+
+// Utility: Generate random color
+const generateColor = () => {
+  const colors = ['#F56565', '#48BB78', '#4299E1', '#ED8936', '#9F7AEA', '#ECC94B', '#FFFFFF'];
+  return colors[Math.floor(Math.random() * colors.length)];
+};
+
+export default function Chat({ username, avatarColor, userId }) {
+  const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY;
+
   const [db, setDb] = useState(null);
   const [auth, setAuth] = useState(null);
-  const [userId, setUserId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+  const [isBotActive, setIsBotActive] = useState(false);
   const messagesEndRef = useRef(null);
-  
-  // Helper function to handle exponential backoff for API calls
+
+  const fakeUsers = [
+    { id: 'alice', name: 'Alice', color: '#f87171' },
+    { id: 'bob', name: 'Bob', color: '#60a5fa' },
+    { id: 'charlie', name: 'Charlie', color: '#fbbf24' },
+    { id: 'dana', name: 'Dana', color: '#34d399' },
+    { id: 'rachel', name: 'Rachel', color: '#ffffff' }
+  ];
+
+  const fakeMessages = [
+    'Hello there!', 'How’s your day going?', 'This chat app is cool 😎',
+    'Anyone here?', 'React is awesome!', 'Testing... 1, 2, 3...', '🔥🔥🔥',
+    'What’s everyone up to?', 'I love coding!', 'Did you see the game last night?',
+    'Coffee or tea?', 'LOL 😂', 'Who wants to collaborate?', 'Can someone help me debug?',
+    'This is so much fun!', '😅 Oops, my bad!', 'Have you tried Vite yet?',
+    'Chatting is relaxing 🛋️', 'Good vibes only ✨', 'I’m a bot, but I’m friendly 🤖',
+    'Wow who made this?!!', 'Go BENGALS!!!!', 'Who else know the Bengals are going to the superbowl this year!!??'
+  ];
+
+  // Always return a color for a message
+  const getAvatarColor = (msg) => msg.avatarColor || generateColor();
+
   const withBackoff = async (func) => {
     let delay = 1000;
     for (let i = 0; i < 5; i++) {
       try {
         return await func();
       } catch (error) {
-        // In a real application, you might check for specific error codes like 429
         console.warn(`API call failed, retrying in ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await new Promise(res => setTimeout(res, delay));
         delay *= 2;
       }
     }
-    throw new Error("API call failed after multiple retries.");
+    throw new Error('API call failed after multiple retries.');
   };
 
-  // Initialize Firebase and set up authentication
+  // Initialize Firebase
   useEffect(() => {
-    if (Object.keys(firebaseConfig).length === 0) {
-      console.error("Firebase config is missing. Please provide it for a working application.");
-      return;
-    }
-
     const app = initializeApp(firebaseConfig);
     const firestore = getFirestore(app);
     const firebaseAuth = getAuth(app);
@@ -49,183 +87,165 @@ export default function App() {
     setAuth(firebaseAuth);
 
     const unsubscribe = onAuthStateChanged(firebaseAuth, (user) => {
-      if (user) {
-        setUserId(user.uid);
-      } else {
-        if (initialAuthToken) {
-          signInWithCustomToken(firebaseAuth, initialAuthToken).catch(console.error);
-        } else {
-          signInAnonymously(firebaseAuth).catch(console.error);
-        }
-      }
+      if (!user) signInAnonymously(firebaseAuth).catch(console.error);
     });
 
     return () => unsubscribe();
-  }, [firebaseConfig, initialAuthToken]);
+  }, []);
 
-  // Set up real-time message listener
+  // Listen for chat messages
   useEffect(() => {
-    if (db && userId) {
-      const messagesCollection = collection(db, `artifacts/${appId}/public/data/chat_messages`);
-      const q = query(messagesCollection, orderBy('createdAt', 'asc'));
+    if (!db) return;
+    const q = query(collection(db, 'chats'), orderBy('createdAt', 'asc'));
+    const unsubscribe = onSnapshot(q,
+      snapshot => setMessages(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))),
+      err => console.error('Error fetching messages:', err)
+    );
+    return () => unsubscribe();
+  }, [db]);
 
-      const unsubscribe = onSnapshot(q, (querySnapshot) => {
-        const fetchedMessages = [];
-        querySnapshot.forEach((doc) => {
-          fetchedMessages.push({ id: doc.id, ...doc.data() });
-        });
-        setMessages(fetchedMessages);
-      }, (error) => {
-        console.error("Error fetching messages: ", error);
-      });
-
-      return () => unsubscribe();
-    }
-  }, [db, userId, appId]);
-
-  // Scroll to the latest message
+  // Auto-scroll
   useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Handle sending a new message
+  // Bot activity
+  useEffect(() => {
+    if (!isBotActive || !db) return;
+    const interval = setInterval(() => {
+      const randomUser = fakeUsers[Math.floor(Math.random() * fakeUsers.length)];
+      const randomMessage = fakeMessages[Math.floor(Math.random() * fakeMessages.length)];
+
+      addDoc(collection(db, 'chats'), {
+        text: randomMessage,
+        createdAt: serverTimestamp(),
+        userId: randomUser.id,
+        username: randomUser.name,
+        avatarColor: randomUser.color || generateColor()
+      }).catch(console.error);
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [isBotActive, db]);
+
   const handleSendMessage = async () => {
     if (!newMessage.trim() || !db || !userId) return;
-
     try {
-      const messagesCollection = collection(db, `artifacts/${appId}/public/data/chat_messages`);
-      await withBackoff(() => addDoc(messagesCollection, {
-        text: newMessage,
-        createdAt: serverTimestamp(),
-        userId: userId,
-      }));
+      await withBackoff(() =>
+        addDoc(collection(db, 'chats'), {
+          text: newMessage,
+          createdAt: serverTimestamp(),
+          userId,
+          username,
+          avatarColor: avatarColor || generateColor()
+        })
+      );
       setNewMessage('');
-    } catch (e) {
-      console.error('Error adding document: ', e);
+    } catch (err) {
+      console.error('Error adding message:', err);
     }
   };
 
-  // Function to summarize the chat using Gemini API
   const handleSummarizeChat = async () => {
-    if (messages.length === 0 || isGeneratingSummary) return;
-
+    if (!messages.length || !geminiApiKey || isGeneratingSummary) return;
     setIsGeneratingSummary(true);
 
     try {
       const chatHistory = messages.map(msg => `${msg.userId === userId ? 'You' : 'User'}: ${msg.text}`);
       const prompt = `Summarize the following chat conversation:\n\n${chatHistory.join('\n')}`;
-
-      const geminiPayload = {
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-      };
-      
-      const apiKey = "";
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+      const payload = { contents: [{ role: 'user', parts: [{ text: prompt }] }] };
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${geminiApiKey}`;
 
       const response = await withBackoff(() => fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(geminiPayload)
+        body: JSON.stringify(payload)
       }));
-      
-      const result = await response.json();
-      const summaryText = result?.candidates?.[0]?.content?.parts?.[0]?.text || "Failed to generate summary.";
 
-      const messagesCollection = collection(db, `artifacts/${appId}/public/data/chat_messages`);
-      await withBackoff(() => addDoc(messagesCollection, {
+      const result = await response.json();
+      const summaryText = result?.candidates?.[0]?.content?.parts?.[0]?.text || 'Failed to generate summary.';
+
+      await withBackoff(() => addDoc(collection(db, 'chats'), {
         text: summaryText,
         createdAt: serverTimestamp(),
-        userId: 'Gemini', // Use a special user ID for the Gemini bot
-        isGeminiSummary: true,
+        userId: 'Gemini',
+        username: 'Gemini',
+        avatarColor: '#9F7AEA', // always has a color
+        isGeminiSummary: true
       }));
-      
-    } catch (error) {
-      console.error('Error summarizing chat:', error);
-      const messagesCollection = collection(db, `artifacts/${appId}/public/data/chat_messages`);
-      await withBackoff(() => addDoc(messagesCollection, {
+    } catch (err) {
+      console.error('Error summarizing chat:', err);
+      await addDoc(collection(db, 'chats'), {
         text: 'Error generating summary. Please try again.',
         createdAt: serverTimestamp(),
         userId: 'Gemini',
-        isGeminiSummary: true,
-      }));
+        username: 'Gemini',
+        avatarColor: '#9F7AEA',
+        isGeminiSummary: true
+      });
     } finally {
       setIsGeneratingSummary(false);
     }
   };
 
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter') {
-      handleSendMessage();
+  const handleClearMessages = async () => {
+    if (!db) return;
+    if (!window.confirm('Are you sure you want to clear all chat messages?')) return;
+
+    try {
+      const snapshot = await getDocs(collection(db, 'chats'));
+      const deletions = snapshot.docs.map(docSnap => deleteDoc(doc(db, 'chats', docSnap.id)));
+      await Promise.all(deletions);
+    } catch (err) {
+      console.error('Error clearing messages:', err);
     }
   };
 
-  // UI rendering
+  const handleKeyDown = (e) => { if (e.key === 'Enter') handleSendMessage(); };
+
   return (
     <div className="flex flex-col h-screen bg-gray-100 font-inter">
-      <header className="bg-gray-800 text-white p-4 flex items-center justify-between shadow-lg">
+      <header className="bg-gray-800 text-white p-4 flex items-center justify-between shadow-lg space-x-2">
         <h1 className="text-2xl font-bold">Real-time Chat</h1>
-        <button
-          onClick={handleSummarizeChat}
-          disabled={isGeneratingSummary}
-          className="bg-purple-600 text-white p-2 rounded-lg font-bold hover:bg-purple-700 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
-        >
-          {isGeneratingSummary ? (
-            <span className="flex items-center">
-              <svg className="animate-spin -ml-1 mr-2 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-              Summarizing...
-            </span>
-          ) : (
-            <>
-              <span className="text-xl mr-2">✨</span>
-              Summarize Chat
-            </>
-          )}
+        <button onClick={handleClearMessages} className="bg-red-600 text-white p-2 rounded-lg hover:bg-red-700">🗑 Clear Chat</button>
+        <button onClick={() => setIsBotActive(prev => !prev)} className={`p-2 rounded-lg font-bold ${isBotActive ? 'bg-yellow-500 text-black' : 'bg-green-600 text-white'}`}>
+          {isBotActive ? '🤖 Stop Bot' : '🤖 Start Bot'}
+        </button>
+        <button onClick={handleSummarizeChat} disabled={isGeneratingSummary} className="bg-purple-600 text-white p-2 rounded-lg hover:bg-purple-700 disabled:opacity-50">
+          {isGeneratingSummary ? 'Summarizing...' : '✨ Summarize Chat'}
         </button>
       </header>
+
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {userId && (
-          <p className="text-sm text-center text-gray-500 mb-4">Your User ID: <span className="font-mono bg-gray-300 rounded px-1">{userId}</span></p>
+          <p className="text-sm text-center text-gray-500 mb-4">
+            Your User ID: <span className="font-mono bg-gray-300 rounded px-1">{userId}</span>
+          </p>
         )}
         {messages.length === 0 ? (
-          <div className="text-center text-gray-500 mt-20">
-            Start the conversation!
-          </div>
-        ) : (
-          messages.map((msg, index) => (
-            <div key={index} className={`flex ${msg.userId === userId ? 'justify-end' : 'justify-start'}`}>
-              <div className={`p-3 rounded-lg max-w-sm shadow-md ${msg.isGeminiSummary ? 'bg-purple-200 text-purple-900 border border-purple-500' : (msg.userId === userId ? 'bg-blue-500 text-white' : 'bg-white text-gray-800')}`}>
-                <div className="font-semibold text-sm mb-1">{msg.isGeminiSummary ? 'Gemini Summary' : (msg.userId === userId ? 'You' : `User ID: ${msg.userId}`)}</div>
-                <div className="text-base">{msg.text}</div>
-                <div className="text-xs mt-1 text-right opacity-75">
-                  {msg.createdAt?.toDate().toLocaleTimeString()}
-                </div>
-              </div>
+          <div className="text-center text-gray-500 mt-20">Start the conversation!</div>
+        ) : messages.map(msg => (
+          <div key={msg.id} className={`flex items-end ${msg.userId === userId ? 'justify-end' : 'justify-start'}`}>
+            {msg.userId !== userId && (
+              <span className="avatar mr-2" style={{ backgroundColor: getAvatarColor(msg), width: 32, height: 32, borderRadius: '50%' }} />
+            )}
+            <div className={`p-3 rounded-lg max-w-sm shadow-md ${msg.isGeminiSummary ? 'bg-purple-200 text-purple-900 border border-purple-500' : msg.userId === userId ? 'bg-blue-500 text-white' : 'bg-white text-gray-800'}`}>
+              <div className="font-semibold text-sm mb-1">{msg.isGeminiSummary ? 'Gemini Summary' : msg.userId === userId ? 'You' : msg.username || `User ID: ${msg.userId}`}</div>
+              <div className="text-base">{msg.text}</div>
+              <div className="text-xs mt-1 text-right opacity-75">{msg.createdAt?.toDate?.()?.toLocaleTimeString()}</div>
             </div>
-          ))
-        )}
+            {msg.userId === userId && (
+              <span className="avatar ml-2" style={{ backgroundColor: avatarColor, width: 32, height: 32, borderRadius: '50%' }} />
+            )}
+          </div>
+        ))}
         <div ref={messagesEndRef} />
       </div>
+
       <div className="p-4 bg-gray-200 border-t border-gray-300 shadow-inner">
         <div className="flex space-x-2">
-          <input
-            type="text"
-            className="flex-1 p-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-            placeholder="Type a message..."
-            value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
-            onKeyDown={handleKeyDown}
-          />
-          <button
-            onClick={handleSendMessage}
-            className="bg-blue-600 text-white p-3 rounded-lg font-bold hover:bg-blue-700 transition-colors duration-200"
-          >
-            Send
-          </button>
+          <input type="text" className="flex-1 p-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500" placeholder="Type a message..." value={newMessage} onChange={e => setNewMessage(e.target.value)} onKeyDown={handleKeyDown} />
+          <button onClick={handleSendMessage} className="bg-blue-600 text-white p-3 rounded-lg font-bold hover:bg-blue-700">Send</button>
         </div>
       </div>
     </div>
